@@ -1,25 +1,154 @@
+import os
+import json
+import torch
+import torch.nn as nn
+import timm
+from PIL import Image
+from torchvision import transforms
+from huggingface_hub import hf_hub_download
+
+# =============================================================================
+# FIX: Monkey-patch gradio_client bug with Python 3.13
+# The bug is in gradio_client/utils.py get_type() where "const" in schema
+# fails when schema is a bool instead of a dict
+# =============================================================================
+import gradio_client.utils as gc_utils
+
+_original_get_type = gc_utils.get_type
+
+def _patched_get_type(schema):
+    if isinstance(schema, bool):
+        return "bool"
+    return _original_get_type(schema)
+
+gc_utils.get_type = _patched_get_type
+
+# Also patch _json_schema_to_python_type to handle bool schemas
+_original_json_schema = gc_utils._json_schema_to_python_type
+
+def _patched_json_schema(schema, defs=None):
+    if isinstance(schema, bool):
+        return "Any"
+    return _original_json_schema(schema, defs)
+
+gc_utils._json_schema_to_python_type = _patched_json_schema
+# =============================================================================
+
 import gradio as gr
-from transformers import pipeline
 
 
-pipeline = pipeline(task="image-classification", model="pranavanbupathy/test-cifar-10")
+class EVA02AircraftClassifier(nn.Module):
+    def __init__(self, model_name, num_classes, image_size):
+        super().__init__()
+        self.backbone = timm.create_model(model_name, pretrained=False,
+                                           num_classes=0, drop_rate=0.0)
+        with torch.no_grad():
+            feat_dim = self.backbone(torch.randn(1, 3, image_size, image_size)).shape[-1]
+        self.head = nn.Sequential(
+            nn.LayerNorm(feat_dim), nn.Dropout(0.3),
+            nn.Linear(feat_dim, 512), nn.GELU(),
+            nn.LayerNorm(512), nn.Dropout(0.15),
+            nn.Linear(512, num_classes),
+        )
 
-def predict(image):
-    predictions = pipeline(image)
-    result = predictions[0]
-    return result["label"]
+    def forward(self, x):
+        return self.head(self.backbone(x))
 
-gr.Interface(
-    fn=predict,
-    inputs=gr.Image(label="Upload only commercial aircraft image here", type="filepath"),
-    outputs=gr.Label(label="Predicted Aircraft Type"),
-    examples=[
-        "./Bombardier-CRJ-700.jpg",
-        "./atr72.jpeg",
-        "./c208.jpg",
-        "./fokker70.jpg",
-        "b737.jpg"
-    ],
-    title="Find which Aircraft it is ✈️",
-    description="Upload an image of a commercial aircraft and the model will predict its type."
-).launch(inline=False)
+
+print("Loading model...")
+model_path = hf_hub_download(repo_id="selmamalak/aircraft-eva021", filename="aircraft_eva02_finetuned.pth")
+kb_path = hf_hub_download(repo_id="selmamalak/aircraft-eva021", filename="aircraft_knowledge_base.json")
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ckpt = torch.load(model_path, map_location=DEVICE, weights_only=False)
+CLASS_NAMES = ckpt["class_names"]
+IMAGE_SIZE = ckpt["image_size"]
+
+MODEL = EVA02AircraftClassifier(ckpt["model_name"], ckpt["num_classes"], IMAGE_SIZE)
+MODEL.load_state_dict(ckpt["model_state_dict"])
+MODEL.to(DEVICE)
+MODEL.eval()
+
+with open(kb_path, "r") as f:
+    KB = json.load(f)["variants"]
+
+TRANSFORM = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+print(f"Model ready! Device: {DEVICE}")
+
+
+def lookup_specs(name):
+    if name in KB:
+        return KB[name]
+    for k in KB:
+        if k in name or name in k:
+            return KB[k]
+    return None
+
+
+@torch.no_grad()
+def classify(image):
+    if image is None:
+        return "Please upload an image."
+
+    img = Image.fromarray(image).convert("RGB")
+    tensor = TRANSFORM(img).unsqueeze(0).to(DEVICE)
+    probs = torch.softmax(MODEL(tensor), dim=1)
+    top_probs, top_idx = probs.topk(5)
+
+    top_variant = CLASS_NAMES[top_idx[0][0].item()]
+    top_conf = top_probs[0][0].item()
+    specs = lookup_specs(top_variant)
+
+    if top_conf > 0.7:
+        level = "HIGH CONFIDENCE"
+    elif top_conf > 0.3:
+        level = "MEDIUM CONFIDENCE"
+    else:
+        level = "LOW CONFIDENCE"
+
+    out = f"=== {level} ===\n\n"
+    out += "TOP-5 PREDICTIONS:\n"
+    out += "-" * 45 + "\n"
+    for i in range(5):
+        v = CLASS_NAMES[top_idx[0][i].item()]
+        c = top_probs[0][i].item() * 100
+        bar = "#" * int(c / 3)
+        marker = " <<< BEST" if i == 0 else ""
+        out += f"  #{i+1}  {v:25s} {c:5.1f}%  {bar}{marker}\n"
+
+    out += "\n" + "=" * 45 + "\n"
+
+    if specs:
+        out += f"\nAIRCRAFT: {top_variant}\n"
+        out += "-" * 45 + "\n"
+        out += f"  Manufacturer : {specs['manufacturer']}\n"
+        out += f"  Family       : {specs['family']}\n"
+        out += f"  Type         : {specs['type']}\n"
+        out += f"  Category     : {specs['category']}\n"
+        out += f"  Engines      : {specs['engines']}x {specs['engine_type']}\n"
+        out += f"  Range        : {specs['range_km']:,} km\n"
+        out += f"  Passengers   : {specs['max_passengers']}\n"
+        out += f"  Length       : {specs['length_m']} m\n"
+        out += f"  Wingspan     : {specs['wingspan_m']} m\n"
+        out += f"  First Flight : {specs['first_flight']}\n"
+        out += f"  Military     : {'Yes' if specs['military'] else 'No'}\n"
+        out += f"  In Production: {'Yes' if specs['still_in_production'] else 'No'}\n"
+        out += f"  Status       : {specs['status']}\n"
+
+    return out
+
+
+demo = gr.Interface(
+    fn=classify,
+    inputs=gr.Image(type="numpy", label="Upload Aircraft Photo"),
+    outputs=gr.Textbox(label="Results", lines=25),
+    title="Aircraft Identifier",
+    description="AI-powered aircraft classification: 102 variants, 92.35% accuracy. Upload a photo of any aircraft. Model: EVA-02-Large fine-tuned on FGVC-Aircraft dataset.",
+    flagging_mode="never",
+)
+
+demo.launch(server_name="0.0.0.0", server_port=7860)

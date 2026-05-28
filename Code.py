@@ -1,5 +1,3 @@
-# app.py
-
 ```python
 import streamlit as st
 import torch
@@ -7,9 +5,9 @@ from torchvision import transforms
 from PIL import Image
 import torch.nn.functional as F
 
-# -----------------------------
+# --------------------------------
 # Seitenkonfiguration
-# -----------------------------
+# --------------------------------
 st.set_page_config(
     page_title="Flugzeug-Erkennung",
     page_icon="✈️",
@@ -17,17 +15,17 @@ st.set_page_config(
 )
 
 st.title("✈️ Flugzeug-Erkennungs-App")
-st.write("Lade ein Bild hoch und das KI-Modell erkennt den Flugzeugtyp.")
+st.write("Lade ein Bild hoch und die KI erkennt den Flugzeugtyp.")
 
-# -----------------------------
+# --------------------------------
 # Gerät wählen (CPU/GPU)
-# -----------------------------
+# --------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -----------------------------
+# --------------------------------
 # Klassen definieren
 # Reihenfolge MUSS wie im Training sein
-# -----------------------------
+# --------------------------------
 classes = [
     "Airbus A320",
     "Boeing 737",
@@ -37,9 +35,9 @@ classes = [
     "Cessna 172"
 ]
 
-# -----------------------------
+# --------------------------------
 # Modell laden
-# -----------------------------
+# --------------------------------
 @st.cache_resource
 def load_model():
     model = torch.load(
@@ -54,23 +52,22 @@ def load_model():
 
 model = load_model()
 
-# -----------------------------
+# --------------------------------
 # Bildtransformation
-# -----------------------------
+# --------------------------------
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
 
-    # Wichtig für viele CNNs
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     )
 ])
 
-# -----------------------------
+# --------------------------------
 # Datei-Upload
-# -----------------------------
+# --------------------------------
 uploaded_file = st.file_uploader(
     "Bild hochladen",
     type=["jpg", "jpeg", "png"]
@@ -88,7 +85,7 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
-    # Vorverarbeitung
+    # Bild vorbereiten
     img_tensor = transform(image).unsqueeze(0).to(device)
 
     # Vorhersage
@@ -115,12 +112,12 @@ if uploaded_file is not None:
         f"Confidence: {confidence_percent:.2f}%"
     )
 
-    # Wahrscheinlichkeiten anzeigen
-    st.subheader("Alle Wahrscheinlichkeiten")
+    # Alle Wahrscheinlichkeiten
+    st.subheader("Wahrscheinlichkeiten")
 
     for i, prob in enumerate(probabilities):
         st.write(
-            f"{classes[i]}: {prob.item()*100:.2f}%"
+            f"{classes[i]}: {prob.item() * 100:.2f}%"
         )
 ```
 

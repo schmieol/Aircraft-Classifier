@@ -1,4 +1,4 @@
-```python
+python
 import streamlit as st
 import torch
 from torchvision import transforms
@@ -119,5 +119,5 @@ if uploaded_file is not None:
         st.write(
             f"{classes[i]}: {prob.item() * 100:.2f}%"
         )
-```
+        
 

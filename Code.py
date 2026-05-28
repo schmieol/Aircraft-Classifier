@@ -1,170 +1,126 @@
-import os
-from pathlib import Path
+# app.py
 
+```python
 import streamlit as st
 import torch
-
+from torchvision import transforms
 from PIL import Image
-from transformers import (
-    AutoImageProcessor,
-    AutoModelForImageClassification
+import torch.nn.functional as F
+
+# -----------------------------
+# Seitenkonfiguration
+# -----------------------------
+st.set_page_config(
+    page_title="Flugzeug-Erkennung",
+    page_icon="✈️",
+    layout="centered"
 )
 
+st.title("✈️ Flugzeug-Erkennungs-App")
+st.write("Lade ein Bild hoch und das KI-Modell erkennt den Flugzeugtyp.")
+
 # -----------------------------
-# Einstellungen
+# Gerät wählen (CPU/GPU)
 # -----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MODEL_NAME = "dima806/military_aircraft_image_detection"
-
-OUTPUT_DIR = "sortierte_flugzeuge"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# -----------------------------
+# Klassen definieren
+# Reihenfolge MUSS wie im Training sein
+# -----------------------------
+classes = [
+    "Airbus A320",
+    "Boeing 737",
+    "Boeing 747",
+    "Eurofighter Typhoon",
+    "F-16",
+    "Cessna 172"
+]
 
 # -----------------------------
 # Modell laden
 # -----------------------------
-
 @st.cache_resource
 def load_model():
-    processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
-
-    model = AutoModelForImageClassification.from_pretrained(
-        MODEL_NAME
+    model = torch.load(
+        "aircraft_classifier.pth",
+        map_location=device
     )
 
-    return processor, model
+    model.eval()
+    model.to(device)
 
+    return model
 
-processor, model = load_model()
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model.to(device)
+model = load_model()
 
 # -----------------------------
-# Streamlit UI
+# Bildtransformation
 # -----------------------------
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
 
-st.set_page_config(
-    page_title="Flugzeug-Erkennung",
-    layout="wide"
+    # Wichtig für viele CNNs
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+# -----------------------------
+# Datei-Upload
+# -----------------------------
+uploaded_file = st.file_uploader(
+    "Bild hochladen",
+    type=["jpg", "jpeg", "png"]
 )
 
-st.title("✈️ Flugzeugmodell-Erkennung")
-st.write(
-    "Lade mehrere Bilder hoch. "
-    "Die App erkennt das Flugzeugmodell "
-    "und sortiert die Bilder automatisch."
-)
+if uploaded_file is not None:
 
-uploaded_files = st.file_uploader(
-    "Bilder hochladen",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True
-)
+    # Bild öffnen
+    image = Image.open(uploaded_file).convert("RGB")
 
-# -----------------------------
-# Bildklassifikation
-# -----------------------------
-
-def classify_image(image):
-    inputs = processor(
-        images=image,
-        return_tensors="pt"
+    # Bild anzeigen
+    st.image(
+        image,
+        caption="Hochgeladenes Bild",
+        use_container_width=True
     )
 
-    inputs = {
-        k: v.to(device)
-        for k, v in inputs.items()
-    }
+    # Vorverarbeitung
+    img_tensor = transform(image).unsqueeze(0).to(device)
 
+    # Vorhersage
     with torch.no_grad():
-        outputs = model(**inputs)
 
-    logits = outputs.logits
+        output = model(img_tensor)
 
-    probs = torch.nn.functional.softmax(
-        logits,
-        dim=-1
+        probabilities = F.softmax(output[0], dim=0)
+
+        confidence, predicted = torch.max(
+            probabilities,
+            0
+        )
+
+    predicted_class = classes[predicted.item()]
+    confidence_percent = confidence.item() * 100
+
+    # Ergebnis anzeigen
+    st.success(
+        f"Erkanntes Flugzeug: {predicted_class}"
     )
 
-    predicted_idx = probs.argmax(-1).item()
+    st.info(
+        f"Confidence: {confidence_percent:.2f}%"
+    )
 
-    label = model.config.id2label[predicted_idx]
+    # Wahrscheinlichkeiten anzeigen
+    st.subheader("Alle Wahrscheinlichkeiten")
 
-    confidence = probs[0][predicted_idx].item()
-
-    return label, confidence
-
-# -----------------------------
-# Verarbeitung
-# -----------------------------
-
-if uploaded_files:
-
-    st.subheader("Ergebnisse")
-
-    cols = st.columns(3)
-
-    for index, uploaded_file in enumerate(uploaded_files):
-
-        image = Image.open(uploaded_file).convert("RGB")
-
-        label, confidence = classify_image(image)
-
-        # Ordner für Flugzeugtyp erstellen
-        label_dir = os.path.join(
-            OUTPUT_DIR,
-            label
+    for i, prob in enumerate(probabilities):
+        st.write(
+            f"{classes[i]}: {prob.item()*100:.2f}%"
         )
+```
 
-        os.makedirs(label_dir, exist_ok=True)
-
-        # Bild speichern
-        save_path = os.path.join(
-            label_dir,
-            uploaded_file.name
-        )
-
-        image.save(save_path)
-
-        # Anzeige
-        with cols[index % 3]:
-
-            st.image(
-                image,
-                caption=f"{label} ({confidence:.2%})",
-                use_container_width=True
-            )
-
-            st.success(f"Erkannt: {label}")
-
-            st.write(
-                f"Confidence: {confidence:.2%}"
-            )
-
-            st.write(
-                f"Gespeichert unter:\n{save_path}"
-            )
-
-# -----------------------------
-# Ordnerübersicht
-# -----------------------------
-
-st.divider()
-
-st.subheader("Sortierte Kategorien")
-
-base_path = Path(OUTPUT_DIR)
-
-if base_path.exists():
-
-    for folder in sorted(base_path.iterdir()):
-
-        if folder.is_dir():
-
-            file_count = len(list(folder.glob("*")))
-
-            st.write(
-                f"📁 {folder.name} "
-                f"({file_count} Bilder)"
-            )
